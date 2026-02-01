@@ -1,48 +1,34 @@
+# gruppe 1-7.py
+
+# Gruppenzuteilung (1..G) - automatisch, möglichst gleichmäßig
+#
+# Teilnehmer:
+#   http://127.0.0.1:8000
+# Admin/Host:
+#   http://127.0.0.1:8000/admin
+#
+# Start:
+#   cd "$env:USERPROFILE\Desktop\gruppen auswahl"
+#   py "gruppe 1-7.py"
 
 
-
-# main.py
-"""
-Gruppenzuteilung (1..G) – automatisch & möglichst gleichmäßig
-Teilnehmer-Seite:  /
-Admin/Host:        /admin
-
-Local Start:
-  uvicorn main:app --reload --host 127.0.0.1 --port 8000
-
-Render Start Command:
-  uvicorn main:app --host 0.0.0.0 --port $PORT
-
-Hinweis zu SQLite auf Render:
-- Ohne Persistent Disk kann die DB nach Restart/Deploy verloren gehen.
-- Optional: setze Umgebungsvariable DB_PATH auf z.B. /var/data/assignments.sqlite
-"""
-
-import os
 import sqlite3
 import secrets
 from datetime import datetime
-from typing import List, Optional
 
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
+import uvicorn
 
-# ---------------------------
-# Konfiguration
-# ---------------------------
-DB_PATH = os.environ.get("DB_PATH", "assignments.sqlite")
+DB_PATH = "assignments.sqlite"
 
-DEFAULT_TOTAL = int(os.environ.get("DEFAULT_TOTAL", "1000"))
-DEFAULT_GROUPS = int(os.environ.get("DEFAULT_GROUPS", "7"))
-
-COOKIE_NAME = "ga_token"
+DEFAULT_TOTAL = 1000
+DEFAULT_GROUPS = 7
 
 app = FastAPI()
 
 
-# ---------------------------
-# Datenbank
-# ---------------------------
+
 def db_connect() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.row_factory = sqlite3.Row
@@ -50,36 +36,25 @@ def db_connect() -> sqlite3.Connection:
 
 
 @app.on_event("startup")
-def init_db() -> None:
+def init_db():
     con = db_connect()
     try:
         cur = con.cursor()
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS assignments (
                 token TEXT PRIMARY KEY,
                 grp INTEGER NOT NULL,
                 created_at TEXT NOT NULL
             );
-            """
-        )
-        cur.execute(
-            """
+        """)
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value INTEGER NOT NULL
             );
-            """
-        )
-
-        cur.execute(
-            "INSERT OR IGNORE INTO settings(key, value) VALUES ('total', ?);",
-            (DEFAULT_TOTAL,),
-        )
-        cur.execute(
-            "INSERT OR IGNORE INTO settings(key, value) VALUES ('groups', ?);",
-            (DEFAULT_GROUPS,),
-        )
+        """)
+        cur.execute("INSERT OR IGNORE INTO settings(key, value) VALUES ('total', ?);", (DEFAULT_TOTAL,))
+        cur.execute("INSERT OR IGNORE INTO settings(key, value) VALUES ('groups', ?);", (DEFAULT_GROUPS,))
         con.commit()
     finally:
         con.close()
@@ -91,13 +66,10 @@ def get_setting(con: sqlite3.Connection, key: str) -> int:
 
 
 def set_setting(con: sqlite3.Connection, key: str, value: int) -> None:
-    con.execute(
-        """
+    con.execute("""
         INSERT INTO settings(key, value) VALUES (?, ?)
         ON CONFLICT(key) DO UPDATE SET value=excluded.value;
-        """,
-        (key, int(value)),
-    )
+    """, (key, int(value)))
     con.commit()
 
 
@@ -106,48 +78,47 @@ def reset_assignments(con: sqlite3.Connection) -> None:
     con.commit()
 
 
-# ---------------------------
-# Algorithmus
-# ---------------------------
-def compute_capacities(total: int, g: int) -> List[int]:
+
+def compute_capacities(total: int, G: int):
     """
-    Kapazität pro Gruppe basierend auf total & g.
+    Capacity pro Gruppe basierend auf total & G.
     Beispiel: 1000 / 7 -> 143,143,143,143,143,143,142
     """
-    base = total // g
-    rest = total % g
-    caps = [base] * g
-    for i in range(rest):
+    base = total // G
+    rem = total % G
+    caps = [base] * G
+    for i in range(rem):
         caps[i] += 1
     return caps
 
 
-def get_counts(con: sqlite3.Connection, g: int) -> List[int]:
-    counts = [0] * g
-    rows = con.execute(
-        "SELECT grp, COUNT(*) AS n FROM assignments GROUP BY grp"
-    ).fetchall()
+def get_counts(con: sqlite3.Connection, G: int):
+    counts = [0] * G
+    rows = con.execute("SELECT grp, COUNT(*) AS n FROM assignments GROUP BY grp").fetchall()
     for r in rows:
-        grp = int(r["grp"])
-        if 1 <= grp <= g:
-            counts[grp - 1] = int(r["n"])
+        g = int(r["grp"])
+        if 1 <= g <= G:
+            counts[g - 1] = int(r["n"])
     return counts
 
 
-def choose_group_fair(counts: List[int], caps: List[int]) -> int:
+def choose_group_fair(counts, caps):
     """
-    Fairer Algorithmus:
+    Fairer Algorithmus, auch wenn total nachträglich geändert wird:
 
     remaining = cap - assigned
-      - Wenn es freie Plätze gibt: wähle Gruppe mit MAX remaining (am leersten)
-      - Wenn alle voll/übervoll: wähle Gruppe mit MAX remaining (am wenigsten übervoll)
+      - Wenn es noch freie Plätze gibt (max remaining > 0):
+          -> wähle Gruppe mit MAX remaining (am leersten)
+      - Wenn alle voll/übervoll (max remaining <= 0):
+          -> wähle Gruppe mit MAX remaining (am wenigsten übervoll)
+             (z.B. -1 ist besser als -10)
 
-    Ergebnis: möglichst gleichmäßige Verteilung, auch wenn Einstellungen später geändert werden.
+    Das sorgt dafür, dass es immer weitergeht und so gleichmäßig wie möglich bleibt.
     """
     remaining = [caps[i] - counts[i] for i in range(len(caps))]
     best = max(remaining)
-    kandidaten = [i for i, r in enumerate(remaining) if r == best]
-    return secrets.choice(kandidaten) + 1  # 1..G
+    candidates = [i for i, r in enumerate(remaining) if r == best]
+    return secrets.choice(candidates) + 1  # 1..G
 
 
 def assign_group(con: sqlite3.Connection, token: str) -> int:
@@ -156,25 +127,25 @@ def assign_group(con: sqlite3.Connection, token: str) -> int:
     """
     con.execute("BEGIN IMMEDIATE;")
     try:
-        # Token schon vorhanden? Dann gleiche Gruppe zurückgeben.
+       
         row = con.execute("SELECT grp FROM assignments WHERE token=?", (token,)).fetchone()
         if row:
             con.execute("COMMIT;")
             return int(row["grp"])
 
         total = get_setting(con, "total")
-        g = get_setting(con, "groups")
-        if total < 1 or g < 1:
+        G = get_setting(con, "groups")
+        if total < 1 or G < 1:
             raise ValueError("Ungültige Einstellungen (Teilnehmerzahl / Gruppen).")
 
-        caps = compute_capacities(total, g)
-        counts = get_counts(con, g)
+        caps = compute_capacities(total, G)
+        counts = get_counts(con, G)
 
         grp = choose_group_fair(counts, caps)
 
         con.execute(
             "INSERT INTO assignments(token, grp, created_at) VALUES (?,?,?)",
-            (token, grp, datetime.utcnow().isoformat(timespec="seconds")),
+            (token, grp, datetime.utcnow().isoformat(timespec="seconds"))
         )
         con.execute("COMMIT;")
         return grp
@@ -183,27 +154,18 @@ def assign_group(con: sqlite3.Connection, token: str) -> int:
         raise
 
 
-# ---------------------------
-# Cookie / Token
-# ---------------------------
 def ensure_token(request: Request, response: HTMLResponse) -> str:
-    token = request.cookies.get(COOKIE_NAME)
+    token = request.cookies.get("ga_token")
     if not token:
         token = secrets.token_urlsafe(24)
-        response.set_cookie(
-            COOKIE_NAME,
-            token,
-            max_age=30 * 24 * 3600,
-            httponly=True,
-            samesite="lax",
-        )
+        response.set_cookie("ga_token", token, max_age=30 * 24 * 3600, httponly=True, samesite="lax")
     return token
 
 
-# ---------------------------
+
 # HTML
-# ---------------------------
-def participant_html(group: Optional[int] = None, error: Optional[str] = None) -> str:
+
+def participant_html(group=None, error=None):
     g_html = ""
     if group is not None:
         g_html = f"""
@@ -233,7 +195,7 @@ def participant_html(group: Optional[int] = None, error: Optional[str] = None) -
   </style>
 </head>
 <body>
-  <h1>Gruppenzuteilung (1–{get_display_groups()}) — automatisch & gleichmäßig</h1>
+  <h1>Gruppenzuteilung (1–7) — automatisch & gleichmäßig</h1>
 
   <div class="wrap">
     <div class="card">
@@ -257,7 +219,7 @@ def participant_html(group: Optional[int] = None, error: Optional[str] = None) -
 """
 
 
-def admin_html(status_rows, total: int, groups: int, note: Optional[str] = None) -> str:
+def admin_html(status_rows, total, groups, note=None):
     note_html = f"""<div class="note">{note}</div>""" if note else ""
 
     rows = ""
@@ -265,7 +227,7 @@ def admin_html(status_rows, total: int, groups: int, note: Optional[str] = None)
         remaining = r["remaining"]
         over = ""
         if remaining < 0:
-            over = f' <span class="over">(überbucht {abs(remaining)})</span>'
+            over = f' <span class="over">(overbooked {abs(remaining)})</span>'
         rows += f"""
         <tr>
           <td>{r['group']}</td>
@@ -323,7 +285,8 @@ def admin_html(status_rows, total: int, groups: int, note: Optional[str] = None)
       </form>
 
       <p class="muted" style="margin-top:12px;">
-        Auto-Refresh alle 3 Sekunden.
+        Auto-Refresh alle 3 Sekunden.<br/>
+        Teilnehmer-Link: <code>http://127.0.0.1:8000</code>
       </p>
       <p class="muted"><a href="/">Zur Teilnehmer-Seite</a></p>
     </div>
@@ -334,9 +297,9 @@ def admin_html(status_rows, total: int, groups: int, note: Optional[str] = None)
         <thead>
           <tr>
             <th>Gruppe</th>
-            <th>Zugewiesen</th>
-            <th>Kapazität</th>
-            <th>Übrig</th>
+            <th>Assigned</th>
+            <th>Capacity</th>
+            <th>Remaining</th>
           </tr>
         </thead>
         <tbody>
@@ -344,8 +307,8 @@ def admin_html(status_rows, total: int, groups: int, note: Optional[str] = None)
         </tbody>
       </table>
       <p class="muted">
-        Hinweis: Wenn du die Teilnehmerzahl nachträglich kleiner stellst als schon zugeteilt wurde,
-        wird „Übrig“ negativ (= überbucht). Die Zuweisung läuft trotzdem fair weiter.
+        Hinweis: Wenn du <b>Teilnehmerzahl nachträglich kleiner</b> stellst als schon zugeteilt wurde,
+        wird Remaining negativ (= overbooked). Die Zuweisung läuft trotzdem fair weiter.
       </p>
     </div>
   </div>
@@ -354,22 +317,7 @@ def admin_html(status_rows, total: int, groups: int, note: Optional[str] = None)
 """
 
 
-def get_display_groups() -> int:
-    # Für die Überschrift auf der Startseite. Falls DB noch nicht verfügbar ist, fallback auf DEFAULT_GROUPS.
-    try:
-        con = db_connect()
-        try:
-            g = get_setting(con, "groups")
-            return g if g > 0 else DEFAULT_GROUPS
-        finally:
-            con.close()
-    except Exception:
-        return DEFAULT_GROUPS
 
-
-# ---------------------------
-# Routes
-# ---------------------------
 @app.get("/", response_class=HTMLResponse)
 def participant_page():
     return HTMLResponse(participant_html())
@@ -385,7 +333,7 @@ def participant_assign(request: Request):
         grp = assign_group(con, token)
         html = participant_html(group=grp)
     except Exception as e:
-        html = participant_html(error=str(e))
+        html = participant_html(group=None, error=str(e))
     finally:
         con.close()
 
@@ -396,33 +344,34 @@ def participant_assign(request: Request):
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page(request: Request):
-    note = "Einstellungen gespeichert." if request.query_params.get("note") else None
+    note = None
+   
+    if request.query_params.get("note"):
+        note = "Einstellungen gespeichert."
 
     con = db_connect()
     try:
         total = get_setting(con, "total")
-        g = get_setting(con, "groups")
-        caps = compute_capacities(total, g)
-        cnt = get_counts(con, g)
-
+        G = get_setting(con, "groups")
+        caps = compute_capacities(total, G)
+        cnt = get_counts(con, G)
         status = []
-        for i in range(g):
-            status.append(
-                {
-                    "group": i + 1,
-                    "assigned": cnt[i],
-                    "capacity": caps[i],
-                    "remaining": caps[i] - cnt[i],
-                }
-            )
+        for i in range(G):
+            status.append({
+                "group": i + 1,
+                "assigned": cnt[i],
+                "capacity": caps[i],
+                "remaining": caps[i] - cnt[i],
+            })
     finally:
         con.close()
 
-    return HTMLResponse(admin_html(status, total, g, note=note))
+    return HTMLResponse(admin_html(status, total, G, note=note))
 
 
 @app.post("/admin/save")
 def admin_save(total: int = Form(...), groups: int = Form(...)):
+    
     con = db_connect()
     try:
         set_setting(con, "total", int(total))
@@ -441,3 +390,7 @@ def admin_reset():
     finally:
         con.close()
     return RedirectResponse("/admin?note=1", status_code=303)
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
